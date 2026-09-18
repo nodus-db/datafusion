@@ -25,7 +25,7 @@ use arrow::array::{
 };
 use arrow::array::{Int8Array, UInt64Array, as_string_array, create_array, record_batch};
 use arrow::compute::kernels::numeric::add;
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Metadata, Schema};
 use arrow_schema::extension::{Bool8, CanonicalExtensionType, ExtensionType};
 use arrow_schema::{ArrowError, FieldRef, SchemaRef};
 use datafusion::common::test_util::batches_to_string;
@@ -1646,9 +1646,7 @@ async fn test_metadata_based_udf() -> Result<()> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("no_metadata", DataType::UInt64, true),
         Field::new("with_metadata", DataType::UInt64, true).with_metadata(
-            [("modify_values".to_string(), "double_output".to_string())]
-                .into_iter()
-                .collect(),
+            Metadata::new().with("modify_values", "double_output"),
         ),
     ]));
     let batch = RecordBatch::try_new(
@@ -1715,10 +1713,7 @@ async fn test_metadata_based_udf() -> Result<()> {
 #[tokio::test]
 async fn test_metadata_based_udf_with_literal() -> Result<()> {
     let ctx = SessionContext::new();
-    let input_metadata: HashMap<String, String> =
-        [("modify_values".to_string(), "double_output".to_string())]
-            .into_iter()
-            .collect();
+    let input_metadata = Metadata::new().with("modify_values", "double_output");
     let input_metadata = FieldMetadata::from(input_metadata);
     let df = ctx.sql("select 0;").await?.select(vec![
         lit(5u64).alias_with_metadata("lit_with_doubling", Some(input_metadata.clone())),

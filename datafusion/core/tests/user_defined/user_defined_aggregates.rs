@@ -30,7 +30,7 @@ use arrow::array::{
     Array, AsArray, Int32Array, PrimitiveArray, StringArray, StructArray, UInt64Array,
     record_batch, types::UInt64Type,
 };
-use arrow::datatypes::{Fields, Schema};
+use arrow::datatypes::{Fields, Metadata, Schema};
 use arrow_schema::FieldRef;
 use datafusion::common::test_util::batches_to_string;
 use datafusion::dataframe::DataFrame;
@@ -1019,9 +1019,7 @@ async fn test_metadata_based_aggregate() -> Result<()> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("no_metadata", DataType::UInt64, true),
         Field::new("with_metadata", DataType::UInt64, true).with_metadata(
-            [("modify_values".to_string(), "double_output".to_string())]
-                .into_iter()
-                .collect(),
+            Metadata::new().with("modify_values", "double_output"),
         ),
     ]));
 
@@ -1094,9 +1092,7 @@ async fn test_metadata_based_aggregate_as_window() -> Result<()> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("no_metadata", DataType::UInt64, true),
         Field::new("with_metadata", DataType::UInt64, true).with_metadata(
-            [("modify_values".to_string(), "double_output".to_string())]
-                .into_iter()
-                .collect(),
+            Metadata::new().with("modify_values", "double_output"),
         ),
     ]));
 

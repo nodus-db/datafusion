@@ -705,15 +705,15 @@ fn date_bin_impl(
                 let array = as_primitive_array::<T>(array)?;
 
                 // Per-row errors become NULL, matching scalar behavior.
-                let mut err = None;
+                let err = std::cell::RefCell::new(None);
                 let result: PrimitiveArray<T> = array.unary_opt(|val| {
                     date_bin_timestamp_value::<T>(val, origin, stride, stride_fn)
                         .unwrap_or_else(|e| {
-                            err.get_or_insert(e);
+                            err.borrow_mut().get_or_insert(e);
                             None
                         })
                 });
-                if let Some(e) = err {
+                if let Some(e) = err.into_inner() {
                     return Err(e);
                 }
 

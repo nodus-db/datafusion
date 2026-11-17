@@ -453,17 +453,21 @@ fn scale_and_bin_to_nanos(
 }
 
 // Per-row timestamp binning shared by scalar and array paths.
-// Source-value failures become None, which callers map to NULL.
+// nodus divergence from upstream ("Per-row failures map to NULL"): a value whose
+// nanosecond scaling overflows i64 is a typed error (as on DataFusion 54, which
+// panicked there), never NULL. Other per-row failures (stride_fn) stay NULL.
 #[inline]
 fn date_bin_timestamp_value<T: ArrowTimestampType>(
     value: i64,
     origin: i64,
     stride: i64,
     stride_fn: BinFunction,
-) -> Option<i64> {
+) -> Result<Option<i64>> {
     let scale = timestamp_scale::<T>();
-    scale_and_bin_to_nanos(value, scale, origin, stride, stride_fn)
-        .map(|binned| binned / scale)
+    let scaled = checked_scale_to_nanos(value, scale)?;
+    Ok(stride_fn(stride, scaled, origin)
+        .ok()
+        .map(|binned| binned / scale))
 }
 
 // Per-row TIME binning shared by scalar and array paths.
@@ -616,41 +620,49 @@ fn date_bin_impl(
     Ok(match array {
         ColumnarValue::Scalar(ScalarValue::TimestampNanosecond(v, tz_opt)) => {
             ColumnarValue::Scalar(ScalarValue::TimestampNanosecond(
-                v.and_then(|x| {
+                v.map(|x| {
                     date_bin_timestamp_value::<TimestampNanosecondType>(
                         x, origin, stride, stride_fn,
                     )
-                }),
+                })
+                .transpose()?
+                .flatten(),
                 tz_opt.clone(),
             ))
         }
         ColumnarValue::Scalar(ScalarValue::TimestampMicrosecond(v, tz_opt)) => {
             ColumnarValue::Scalar(ScalarValue::TimestampMicrosecond(
-                v.and_then(|x| {
+                v.map(|x| {
                     date_bin_timestamp_value::<TimestampMicrosecondType>(
                         x, origin, stride, stride_fn,
                     )
-                }),
+                })
+                .transpose()?
+                .flatten(),
                 tz_opt.clone(),
             ))
         }
         ColumnarValue::Scalar(ScalarValue::TimestampMillisecond(v, tz_opt)) => {
             ColumnarValue::Scalar(ScalarValue::TimestampMillisecond(
-                v.and_then(|x| {
+                v.map(|x| {
                     date_bin_timestamp_value::<TimestampMillisecondType>(
                         x, origin, stride, stride_fn,
                     )
-                }),
+                })
+                .transpose()?
+                .flatten(),
                 tz_opt.clone(),
             ))
         }
         ColumnarValue::Scalar(ScalarValue::TimestampSecond(v, tz_opt)) => {
             ColumnarValue::Scalar(ScalarValue::TimestampSecond(
-                v.and_then(|x| {
+                v.map(|x| {
                     date_bin_timestamp_value::<TimestampSecondType>(
                         x, origin, stride, stride_fn,
                     )
-                }),
+                })
+                .transpose()?
+                .flatten(),
                 tz_opt.clone(),
             ))
         }
@@ -693,9 +705,17 @@ fn date_bin_impl(
                 let array = as_primitive_array::<T>(array)?;
 
                 // Per-row errors become NULL, matching scalar behavior.
+                let mut err = None;
                 let result: PrimitiveArray<T> = array.unary_opt(|val| {
                     date_bin_timestamp_value::<T>(val, origin, stride, stride_fn)
+                        .unwrap_or_else(|e| {
+                            err.get_or_insert(e);
+                            None
+                        })
                 });
+                if let Some(e) = err {
+                    return Err(e);
+                }
 
                 let array = result.with_timezone_opt(tz_opt.clone());
                 Ok(ColumnarValue::Array(Arc::new(array)))

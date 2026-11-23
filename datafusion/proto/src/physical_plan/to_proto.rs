@@ -144,8 +144,8 @@ pub fn serialize_physical_window_expr(
                         expr.fun().name().to_string(),
                     ),
                     (!buf.is_empty()).then_some(buf),
-                    false, // WindowUDFExpr doesn't have ignore_nulls/distinct
-                    false,
+                    expr.ignore_nulls(),
+                    false, // WindowUDFExpr has no distinct
                 )
             } else {
                 return not_impl_err!(

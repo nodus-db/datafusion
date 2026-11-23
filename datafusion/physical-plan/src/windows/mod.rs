@@ -240,6 +240,12 @@ impl WindowUDFExpr {
     pub fn args(&self) -> &[Arc<dyn PhysicalExpr>] {
         &self.args
     }
+
+    /// Whether `IGNORE NULLS` is defined. Serialization needs it: without it a window function
+    /// that skips nulls is rebuilt as one that does not.
+    pub fn ignore_nulls(&self) -> bool {
+        self.ignore_nulls
+    }
 }
 
 impl StandardWindowFunctionExpr for WindowUDFExpr {

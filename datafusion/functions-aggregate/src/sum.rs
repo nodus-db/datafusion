@@ -244,13 +244,14 @@ impl AggregateUDFImpl for Sum {
                 let new_precision = DECIMAL64_MAX_PRECISION.min(*precision + 10);
                 Ok(DataType::Decimal64(new_precision, *scale))
             }
-            DataType::Decimal128(precision, scale) => {
-                let new_precision = DECIMAL128_MAX_PRECISION.min(*precision + 10);
-                Ok(DataType::Decimal128(new_precision, *scale))
+            // REFQ DECIMAL contract (DECIMAL-PS-RULES rev 3, DEC-599): the sum of any 128-bit
+            // decimal is declared at the container maximum at the same scale, so the addition
+            // can never overflow the declared type; the 256-bit variant keeps D(76, s).
+            DataType::Decimal128(_, scale) => {
+                Ok(DataType::Decimal128(DECIMAL128_MAX_PRECISION, *scale))
             }
-            DataType::Decimal256(precision, scale) => {
-                let new_precision = DECIMAL256_MAX_PRECISION.min(*precision + 10);
-                Ok(DataType::Decimal256(new_precision, *scale))
+            DataType::Decimal256(_, scale) => {
+                Ok(DataType::Decimal256(DECIMAL256_MAX_PRECISION, *scale))
             }
             DataType::Duration(time_unit) => Ok(DataType::Duration(*time_unit)),
             DataType::Interval(interval_unit) => Ok(DataType::Interval(*interval_unit)),

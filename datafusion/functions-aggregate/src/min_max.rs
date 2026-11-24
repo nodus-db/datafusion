@@ -115,12 +115,18 @@ impl Default for Max {
 ///
 /// [`ArrowPrimitiveType`]: arrow::datatypes::ArrowPrimitiveType
 macro_rules! primitive_max_accumulator {
-    ($DATA_TYPE:ident, $NATIVE:ident, $PRIMTYPE:ident) => {{
+    ($DATA_TYPE:ident, $NATIVE:ident, $PRIMTYPE:ident) => {{ primitive_max_accumulator_cmp!($DATA_TYPE, $NATIVE, $PRIMTYPE, cmp_partial) }};
+}
+
+/// [`primitive_max_accumulator`] with an explicit comparison: the float natives pass a total
+/// order (S7: NaN is greater than every number), the rest keep `partial_cmp`.
+macro_rules! primitive_max_accumulator_cmp {
+    ($DATA_TYPE:ident, $NATIVE:ident, $PRIMTYPE:ident, $CMP:path) => {{
         Ok(Box::new(
             PrimitiveGroupsAccumulator::<$PRIMTYPE, _>::new($DATA_TYPE, |cur, new| {
-                match (new).partial_cmp(cur) {
-                    Some(Ordering::Greater) | None => {
-                        // new is Greater or None
+                match $CMP(new, cur) {
+                    Some(Ordering::Greater) => {
+                        // new is Greater
                         *cur = new
                     }
                     _ => {}
@@ -138,12 +144,18 @@ macro_rules! primitive_max_accumulator {
 ///
 /// [`ArrowPrimitiveType`]: arrow::datatypes::ArrowPrimitiveType
 macro_rules! primitive_min_accumulator {
-    ($DATA_TYPE:ident, $NATIVE:ident, $PRIMTYPE:ident) => {{
+    ($DATA_TYPE:ident, $NATIVE:ident, $PRIMTYPE:ident) => {{ primitive_min_accumulator_cmp!($DATA_TYPE, $NATIVE, $PRIMTYPE, cmp_partial) }};
+}
+
+/// [`primitive_min_accumulator`] with an explicit comparison: the float natives pass a total
+/// order (S7: NaN is greater than every number), the rest keep `partial_cmp`.
+macro_rules! primitive_min_accumulator_cmp {
+    ($DATA_TYPE:ident, $NATIVE:ident, $PRIMTYPE:ident, $CMP:path) => {{
         Ok(Box::new(
             PrimitiveGroupsAccumulator::<$PRIMTYPE, _>::new(&$DATA_TYPE, |cur, new| {
-                match (new).partial_cmp(cur) {
-                    Some(Ordering::Less) | None => {
-                        // new is Less or NaN
+                match $CMP(new, cur) {
+                    Some(Ordering::Less) => {
+                        // new is Less
                         *cur = new
                     }
                     _ => {}
@@ -153,6 +165,29 @@ macro_rules! primitive_min_accumulator {
             .with_starting_value($NATIVE::MAX),
         ))
     }};
+}
+
+/// Partial comparison for every native that cannot be NaN: `None` never occurs there.
+#[inline]
+fn cmp_partial<T: PartialOrd>(new: T, cur: &T) -> Option<Ordering> {
+    new.partial_cmp(cur)
+}
+
+/// Total order for the float natives, so grouped MIN/MAX do not depend on row order and match
+/// the S7 contract: NaN is greater than every number (and `total_cmp` separates -0 from +0).
+#[inline]
+fn total_f16(new: f16, cur: &f16) -> Option<Ordering> {
+    Some(new.total_cmp(cur))
+}
+
+#[inline]
+fn total_f32(new: f32, cur: &f32) -> Option<Ordering> {
+    Some(new.total_cmp(cur))
+}
+
+#[inline]
+fn total_f64(new: f64, cur: &f64) -> Option<Ordering> {
+    Some(new.total_cmp(cur))
 }
 
 trait FromColumnStatistics {
@@ -272,13 +307,13 @@ impl AggregateUDFImpl for Max {
             UInt32 => primitive_max_accumulator!(data_type, u32, UInt32Type),
             UInt64 => primitive_max_accumulator!(data_type, u64, UInt64Type),
             Float16 => {
-                primitive_max_accumulator!(data_type, f16, Float16Type)
+                primitive_max_accumulator_cmp!(data_type, f16, Float16Type, total_f16)
             }
             Float32 => {
-                primitive_max_accumulator!(data_type, f32, Float32Type)
+                primitive_max_accumulator_cmp!(data_type, f32, Float32Type, total_f32)
             }
             Float64 => {
-                primitive_max_accumulator!(data_type, f64, Float64Type)
+                primitive_max_accumulator_cmp!(data_type, f64, Float64Type, total_f64)
             }
             Date32 => primitive_max_accumulator!(data_type, i32, Date32Type),
             Date64 => primitive_max_accumulator!(data_type, i64, Date64Type),
@@ -566,13 +601,13 @@ impl AggregateUDFImpl for Min {
             UInt32 => primitive_min_accumulator!(data_type, u32, UInt32Type),
             UInt64 => primitive_min_accumulator!(data_type, u64, UInt64Type),
             Float16 => {
-                primitive_min_accumulator!(data_type, f16, Float16Type)
+                primitive_min_accumulator_cmp!(data_type, f16, Float16Type, total_f16)
             }
             Float32 => {
-                primitive_min_accumulator!(data_type, f32, Float32Type)
+                primitive_min_accumulator_cmp!(data_type, f32, Float32Type, total_f32)
             }
             Float64 => {
-                primitive_min_accumulator!(data_type, f64, Float64Type)
+                primitive_min_accumulator_cmp!(data_type, f64, Float64Type, total_f64)
             }
             Date32 => primitive_min_accumulator!(data_type, i32, Date32Type),
             Date64 => primitive_min_accumulator!(data_type, i64, Date64Type),

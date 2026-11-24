@@ -199,6 +199,24 @@ impl<'a> BinaryTypeCoercer<'a> {
     fn signature_inner(&'a self, lhs: &DataType, rhs: &DataType) -> Result<Signature> {
         use Operator::*;
         use arrow::datatypes::DataType::*;
+        // REFQ DECIMAL contract §2.2 (`DECIMAL-PS-RULES.md` rev 4.4, DEC-599/603): a DECIMAL mixed
+        // with a float is not coerced silently in either direction - the caller has to say which way
+        // the value is meant to move. Without this the engine would convert the float into
+        // DECIMAL(30,15) (comparison) or lift the decimal into f64 (arithmetic), both with silent loss.
+        if let Some((decimal, float)) = match (lhs.is_decimal(), rhs.is_decimal()) {
+            (true, false) if rhs.is_floating() => Some((lhs, rhs)),
+            (false, true) if lhs.is_floating() => Some((rhs, lhs)),
+            _ => None,
+        } {
+            return Err(plan_datafusion_err!(
+                "NEEDS_EXPLICIT_CAST: {} {} {} mixes DECIMAL {} with float {}; cast one side explicitly",
+                self.lhs,
+                self.op,
+                self.rhs,
+                decimal,
+                float
+            ));
+        }
         let result = match self.op {
         Eq |
         NotEq |

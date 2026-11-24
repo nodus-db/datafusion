@@ -171,6 +171,17 @@ impl<'a> BinaryTypeCoercer<'a> {
         rhs: &DataType,
     ) -> arrow::error::Result<DataType> {
         use arrow::compute::kernels::numeric::*;
+        // REFQ DECIMAL contract (`designs/petabyte/TO-BE/REFQ/DECIMAL-PS-RULES.md` rev 3,
+        // DEC-599): a decimal division takes its scale from the operands, not from arrow's fixed
+        // `s1 + 4` increment (`arrow-arith` `Op::Div`), and the scale is capped so that the
+        // declared type is representable:
+        //   s = min(max(6, s1 + p2 + 1), 76 - (int1 + s2)),  p = int1 + s2 + s
+        // A negative cap means no `DECIMAL256` type can hold the quotient: a planning error.
+        if self.op == Operator::Divide {
+            if let Some(result) = decimal_division_type(lhs, rhs) {
+                return result;
+            }
+        }
         let l = new_empty_array(lhs);
         let r = new_empty_array(rhs);
 
@@ -1099,6 +1110,44 @@ pub fn decimal_coercion(lhs_type: &DataType, rhs_type: &DataType) -> Option<Data
         (_, _) => None,
     }
 }
+/// `(precision, scale)` of any decimal data type.
+pub fn decimal_precision_scale(data_type: &DataType) -> Option<(u8, i8)> {
+    match data_type {
+        DataType::Decimal32(p, s)
+        | DataType::Decimal64(p, s)
+        | DataType::Decimal128(p, s)
+        | DataType::Decimal256(p, s) => Some((*p, *s)),
+        _ => None,
+    }
+}
+
+/// Result type of a decimal division under the REFQ contract (`DECIMAL-PS-RULES.md` rev 3, DEC-599):
+/// `s = min(max(6, s1 + p2 + 1), 76 - (int1 + s2))`, `p = int1 + s2 + s`, `int1 = p1 - s1`.
+/// `None` when either side is not a decimal; `Some(Err(..))` when no `DECIMAL256` can hold it.
+pub fn decimal_division_type(
+    lhs: &DataType,
+    rhs: &DataType,
+) -> Option<arrow::error::Result<DataType>> {
+    let (p1, s1) = decimal_precision_scale(lhs)?;
+    let (p2, s2) = decimal_precision_scale(rhs)?;
+    let int1 = i32::from(p1) - i32::from(s1);
+    let headroom = 76 - (int1 + i32::from(s2));
+    Some(if headroom < 0 {
+        Err(arrow::error::ArrowError::InvalidArgumentError(format!(
+            "decimal division {lhs} / {rhs} is not representable: {int1} integer digits and a \
+             divisor scale of {s2} leave no room for any scale within DECIMAL256(76)"
+        )))
+    } else {
+        let scale = (i32::from(s1) + i32::from(p2) + 1).max(6).min(headroom);
+        let precision = int1 + i32::from(s2) + scale;
+        if precision <= 38 {
+            Ok(DataType::Decimal128(precision as u8, scale as i8))
+        } else {
+            Ok(DataType::Decimal256(precision as u8, scale as i8))
+        }
+    })
+}
+
 /// Handle cross-variant decimal widening by choosing the larger variant
 fn get_wider_decimal_type_cross_variant(
     lhs_type: &DataType,

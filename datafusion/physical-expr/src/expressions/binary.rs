@@ -30,7 +30,9 @@ use arrow::compute::{SlicesIterator, cast, filter_record_batch};
 use arrow::datatypes::*;
 use arrow::error::ArrowError;
 use datafusion_common::cast::as_boolean_array;
-use datafusion_common::{Result, ScalarValue, internal_err, not_impl_err};
+use datafusion_common::{
+    Result, ScalarValue, exec_datafusion_err, exec_err, internal_err, not_impl_err,
+};
 
 use datafusion_expr::binary::BinaryTypeCoercer;
 use datafusion_expr::interval_arithmetic::{Interval, apply_operator};
@@ -262,6 +264,153 @@ const MILLIS_PER_DAY: i64 = 86_400_000;
 ///
 /// This matches the behavior of PostgreSQL, DuckDB, and MySQL, where
 /// `date - date` yields an integer day count rather than an interval.
+/// `10^n` as an `i256`; `None` when it does not fit (an execution-time overflow of the check).
+fn decimal_pow10(n: i32) -> Option<i256> {
+    let ten = i256::from_i128(10);
+    let mut unit = i256::ONE;
+    for _ in 0..n {
+        unit = unit.checked_mul(ten)?;
+    }
+    Some(unit)
+}
+
+/// Unscaled `i256` values of a decimal array, nulls preserved. Casting to `Decimal256` at the same
+/// scale only widens the container, so the unscaled value is unchanged.
+fn decimal_unscaled(array: &ArrayRef, scale: i8) -> Result<Vec<Option<i256>>> {
+    let wide = cast(array, &DataType::Decimal256(76, scale))?;
+    let values = wide
+        .as_any()
+        .downcast_ref::<Decimal256Array>()
+        .ok_or_else(|| internal_err!("decimal cast produced a non-decimal array"))?;
+    Ok((0..values.len())
+        .map(|i| (!values.is_null(i)).then(|| values.value(i)))
+        .collect())
+}
+
+/// `round_HALF_EVEN(n / d)` for `d != 0`: truncate, then move one step away from zero when the
+/// remainder is more than half, or exactly half and the truncated quotient is odd.
+fn decimal_round_ratio(n: i256, d: i256) -> Option<i256> {
+    if d == i256::ZERO {
+        return None;
+    }
+    let mut q = n / d;
+    let r = n % d;
+    if r != i256::ZERO {
+        let twice = r.wrapping_abs().wrapping_mul(i256::from_i128(2));
+        let away = match twice.cmp(&d.wrapping_abs()) {
+            Ordering::Greater => true,
+            Ordering::Less => false,
+            Ordering::Equal => (q % i256::from_i128(2)) != i256::ZERO,
+        };
+        if away {
+            q = if (n < i256::ZERO) != (d < i256::ZERO) {
+                q - i256::ONE
+            } else {
+                q + i256::ONE
+            };
+        }
+    }
+    Some(q)
+}
+
+/// Decimal division at the contract scale: `A · 10^(s2 + s_t - s1) / B`, one HALF_EVEN rounding.
+/// A zero divisor is SQL `NULL`; a quotient that does not fit the declared precision is a typed
+/// overflow error, never a silent cut.
+fn decimal_divide(
+    lhs: &ColumnarValue,
+    rhs: &ColumnarValue,
+    num_rows: usize,
+    target: &DataType,
+) -> Result<ColumnarValue> {
+    let (precision, scale) = match target {
+        DataType::Decimal128(p, s) | DataType::Decimal256(p, s) => (*p, *s),
+        other => {
+            return internal_err!(
+                "decimal division declared a non-decimal type: {other}"
+            );
+        }
+    };
+    let s1 = match lhs.data_type() {
+        DataType::Decimal128(_, s) | DataType::Decimal256(_, s) => s,
+        other => {
+            return internal_err!("decimal division of a non-decimal operand: {other}");
+        }
+    };
+    let s2 = match rhs.data_type() {
+        DataType::Decimal128(_, s) | DataType::Decimal256(_, s) => s,
+        other => {
+            return internal_err!("decimal division of a non-decimal operand: {other}");
+        }
+    };
+    let left = lhs.clone().into_array(num_rows)?;
+    let right = rhs.clone().into_array(num_rows)?;
+    let a = decimal_unscaled(&left, s1)?;
+    let b = decimal_unscaled(&right, s2)?;
+    let limit = decimal_pow10(i32::from(precision)).ok_or_else(|| {
+        exec_datafusion_err!("DECIMAL_OVERFLOW: 10^{precision} does not fit i256")
+    })?;
+    let shift = i32::from(s2) + i32::from(scale) - i32::from(s1);
+    let mut out: Vec<Option<i256>> = Vec::with_capacity(num_rows);
+    for i in 0..num_rows {
+        let (Some(av), Some(bv)) = (a[i], b[i]) else {
+            out.push(None);
+            continue;
+        };
+        if bv == i256::ZERO {
+            out.push(None);
+            continue;
+        }
+        let (n, d) = if shift >= 0 {
+            let factor = decimal_pow10(shift).ok_or_else(|| {
+                exec_datafusion_err!("DECIMAL_OVERFLOW: the division intermediate 10^{shift} does not fit i256")
+            })?;
+            (
+                av.checked_mul(factor).ok_or_else(|| {
+                    exec_datafusion_err!(
+                        "DECIMAL_OVERFLOW: the division intermediate does not fit i256"
+                    )
+                })?,
+                bv,
+            )
+        } else {
+            let factor = decimal_pow10(-shift).ok_or_else(|| {
+                exec_datafusion_err!(
+                    "DECIMAL_OVERFLOW: the division intermediate 10^{} does not fit i256",
+                    -shift
+                )
+            })?;
+            (
+                av,
+                bv.checked_mul(factor).ok_or_else(|| {
+                    exec_datafusion_err!(
+                        "DECIMAL_OVERFLOW: the division intermediate does not fit i256"
+                    )
+                })?,
+            )
+        };
+        let q = decimal_round_ratio(n, d)
+            .ok_or_else(|| internal_err!("decimal division lost its divisor"))?;
+        if q.wrapping_abs() >= limit {
+            return exec_err!(
+                "DECIMAL_OVERFLOW: the quotient does not fit DECIMAL({precision},{scale})"
+            );
+        }
+        out.push(Some(q));
+    }
+    let array: ArrayRef = if precision <= 38 {
+        let values: Vec<Option<i128>> = out
+            .into_iter()
+            .map(|value| value.and_then(|v| v.to_i128()))
+            .collect();
+        Arc::new(
+            Decimal128Array::from(values).with_precision_and_scale(precision, scale)?,
+        )
+    } else {
+        Arc::new(Decimal256Array::from(out).with_precision_and_scale(precision, scale)?)
+    };
+    Ok(ColumnarValue::Array(array))
+}
+
 fn apply_date_subtraction(
     lhs: &ColumnarValue,
     rhs: &ColumnarValue,
@@ -648,6 +797,15 @@ impl PhysicalExpr for BinaryExpr {
             Operator::Minus => return apply(&lhs, &rhs, sub_wrapping),
             Operator::Multiply if self.fail_on_overflow => return apply(&lhs, &rhs, mul),
             Operator::Multiply => return apply(&lhs, &rhs, mul_wrapping),
+            // REFQ DECIMAL contract (`DECIMAL-PS-RULES.md` rev 3, DEC-599): a decimal division is
+            // evaluated at the declared scale, rounded once HALF_EVEN, in `i256` — arrow's kernel
+            // would compute `s1 + 4` instead, i.e. a different type than the plan promises.
+            Operator::Divide
+                if left_data_type.is_decimal() && right_data_type.is_decimal() =>
+            {
+                let target = self.data_type(input_schema)?;
+                return decimal_divide(&lhs, &rhs, batch.num_rows(), &target);
+            }
             Operator::Divide => return apply(&lhs, &rhs, div),
             Operator::Modulo => return apply(&lhs, &rhs, rem),
 

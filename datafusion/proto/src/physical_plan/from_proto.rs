@@ -318,8 +318,9 @@ pub fn parse_physical_expr_with_converter(
                     arg_fields: &arg_fields,
                     scalar_arguments: &[],
                 })
-                .or_else(|_| {
-                    // E0308: the fallback must be a `FieldRef` (Arc<Field>), not a bare `Field`.
+                .or_else(|_| -> Result<FieldRef, datafusion_common::DataFusionError> {
+                    // E0308/E0282: the fallback is a `FieldRef` (Arc<Field>), and `Result` needs both
+                    // parameters spelled out - the closure's `Ok` alone infers neither.
                     Ok(Arc::new(Field::new(
                         &e.return_field_name,
                         convert_required!(e.return_type)?,

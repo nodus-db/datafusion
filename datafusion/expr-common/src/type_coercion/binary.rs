@@ -177,7 +177,7 @@ impl<'a> BinaryTypeCoercer<'a> {
         // declared type is representable:
         //   s = min(max(6, s1 + p2 + 1), 76 - (int1 + s2)),  p = int1 + s2 + s
         // A negative cap means no `DECIMAL256` type can hold the quotient: a planning error.
-        if self.op == Operator::Divide {
+        if *self.op == Operator::Divide {
             if let Some(result) = decimal_division_type(lhs, rhs) {
                 return result;
             }

@@ -305,17 +305,24 @@ pub fn parse_physical_expr_with_converter(
 
             let config_options = Arc::clone(ctx.task_ctx().session_config().options());
 
+            // The wire form carries only the return field's name/type/nullable, so rebuilding the
+            // `Field` from those three values silently drops its METADATA (e.g. the SRID on a geometry
+            // return). The UDF is authoritative: ask it for the return field, and fall back to the wire
+            // values only when it cannot answer (no `fun_definition`, mismatched arguments).
+            let return_field = scalar_fun_def.return_field(&args).or_else(|_| {
+                Ok(Field::new(
+                    &e.return_field_name,
+                    convert_required!(e.return_type)?,
+                    true,
+                ))
+            })?;
+
             Arc::new(
                 ScalarFunctionExpr::new(
                     e.name.as_str(),
                     scalar_fun_def,
                     args,
-                    Field::new(
-                        &e.return_field_name,
-                        convert_required!(e.return_type)?,
-                        true,
-                    )
-                    .into(),
+                    return_field.into(),
                     config_options,
                 )
                 .with_nullable(e.nullable),

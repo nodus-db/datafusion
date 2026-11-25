@@ -144,13 +144,22 @@ macro_rules! primitive_max_accumulator_cmp {
 ///
 /// [`ArrowPrimitiveType`]: arrow::datatypes::ArrowPrimitiveType
 macro_rules! primitive_min_accumulator {
-    ($DATA_TYPE:ident, $NATIVE:ident, $PRIMTYPE:ident) => {{ primitive_min_accumulator_cmp!($DATA_TYPE, $NATIVE, $PRIMTYPE, cmp_partial) }};
+    ($DATA_TYPE:ident, $NATIVE:ident, $PRIMTYPE:ident) => {{
+        primitive_min_accumulator_cmp!(
+            $DATA_TYPE,
+            $NATIVE,
+            $PRIMTYPE,
+            cmp_partial,
+            $NATIVE::MAX
+        )
+    }};
 }
 
-/// [`primitive_min_accumulator`] with an explicit comparison: the float natives pass a total
-/// order (S7: NaN is greater than every number), the rest keep `partial_cmp`.
+/// [`primitive_min_accumulator`] with an explicit comparison and starting value: the float
+/// natives pass a total order (S7: NaN is greater than every number) and start at NaN, so a
+/// group of nothing but NaNs yields NaN instead of `$NATIVE::MAX`; the rest keep `partial_cmp`.
 macro_rules! primitive_min_accumulator_cmp {
-    ($DATA_TYPE:ident, $NATIVE:ident, $PRIMTYPE:ident, $CMP:path) => {{
+    ($DATA_TYPE:ident, $NATIVE:ident, $PRIMTYPE:ident, $CMP:path, $START:expr) => {{
         Ok(Box::new(
             PrimitiveGroupsAccumulator::<$PRIMTYPE, _>::new(&$DATA_TYPE, |cur, new| {
                 match $CMP(new, cur) {
@@ -161,8 +170,9 @@ macro_rules! primitive_min_accumulator_cmp {
                     _ => {}
                 }
             })
-            // Initialize each accumulator to $NATIVE::MAX
-            .with_starting_value($NATIVE::MAX),
+            // Initialize each accumulator to $START (`$NATIVE::MAX` for the natives that cannot
+            // be NaN, NaN for the floats).
+            .with_starting_value($START),
         ))
     }};
 }
@@ -175,20 +185,22 @@ fn cmp_partial<T: PartialOrd>(new: T, cur: &T) -> Option<Ordering> {
 
 /// Total order for the float natives, so grouped MIN/MAX do not depend on row order and match
 /// the S7 contract: NaN is greater than every number (and `total_cmp` separates -0 from +0).
-#[inline]
-fn total_f16(new: f16, cur: &f16) -> Option<Ordering> {
-    Some(new.total_cmp(cur))
+///
+/// A NaN's sign bit is not part of its value, but `total_cmp` reads it: a negative NaN would
+/// order below `-inf`, so it is canonicalised to the positive quiet NaN before comparing.
+macro_rules! total_float_cmp {
+    ($FN:ident, $T:ty) => {
+        #[inline]
+        fn $FN(new: $T, cur: &$T) -> Option<Ordering> {
+            let canonical = |value: $T| if value.is_nan() { <$T>::NAN } else { value };
+            Some(canonical(new).total_cmp(&canonical(*cur)))
+        }
+    };
 }
 
-#[inline]
-fn total_f32(new: f32, cur: &f32) -> Option<Ordering> {
-    Some(new.total_cmp(cur))
-}
-
-#[inline]
-fn total_f64(new: f64, cur: &f64) -> Option<Ordering> {
-    Some(new.total_cmp(cur))
-}
+total_float_cmp!(total_f16, f16);
+total_float_cmp!(total_f32, f32);
+total_float_cmp!(total_f64, f64);
 
 trait FromColumnStatistics {
     fn value_from_column_statistics(
@@ -601,13 +613,31 @@ impl AggregateUDFImpl for Min {
             UInt32 => primitive_min_accumulator!(data_type, u32, UInt32Type),
             UInt64 => primitive_min_accumulator!(data_type, u64, UInt64Type),
             Float16 => {
-                primitive_min_accumulator_cmp!(data_type, f16, Float16Type, total_f16)
+                primitive_min_accumulator_cmp!(
+                    data_type,
+                    f16,
+                    Float16Type,
+                    total_f16,
+                    f16::NAN
+                )
             }
             Float32 => {
-                primitive_min_accumulator_cmp!(data_type, f32, Float32Type, total_f32)
+                primitive_min_accumulator_cmp!(
+                    data_type,
+                    f32,
+                    Float32Type,
+                    total_f32,
+                    f32::NAN
+                )
             }
             Float64 => {
-                primitive_min_accumulator_cmp!(data_type, f64, Float64Type, total_f64)
+                primitive_min_accumulator_cmp!(
+                    data_type,
+                    f64,
+                    Float64Type,
+                    total_f64,
+                    f64::NAN
+                )
             }
             Date32 => primitive_min_accumulator!(data_type, i32, Date32Type),
             Date64 => primitive_min_accumulator!(data_type, i64, Date64Type),

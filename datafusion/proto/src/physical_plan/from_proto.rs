@@ -23,7 +23,7 @@ use arrow::array::RecordBatch;
 use arrow::compute::SortOptions;
 use arrow::datatypes::{Field, Schema};
 use arrow::ipc::reader::StreamReader;
-use datafusion_common::{Result, internal_datafusion_err, not_impl_err};
+use datafusion_common::{FieldRef, Result, internal_datafusion_err, not_impl_err};
 use datafusion_datasource::TableSchema;
 use datafusion_datasource::file::FileSource;
 use datafusion_datasource::file_scan_config::FileScanConfig;

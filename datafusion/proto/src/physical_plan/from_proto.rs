@@ -319,11 +319,12 @@ pub fn parse_physical_expr_with_converter(
                     scalar_arguments: &[],
                 })
                 .or_else(|_| {
-                    Ok(Field::new(
+                    // E0308: the fallback must be a `FieldRef` (Arc<Field>), not a bare `Field`.
+                    Ok(Arc::new(Field::new(
                         &e.return_field_name,
                         convert_required!(e.return_type)?,
                         true,
-                    ))
+                    )) as FieldRef)
                 })?;
 
             Arc::new(

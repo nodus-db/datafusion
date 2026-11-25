@@ -31,7 +31,8 @@ use arrow::datatypes::*;
 use arrow::error::ArrowError;
 use datafusion_common::cast::as_boolean_array;
 use datafusion_common::{
-    Result, ScalarValue, exec_datafusion_err, exec_err, internal_err, not_impl_err,
+    Result, ScalarValue, exec_datafusion_err, exec_err, internal_datafusion_err,
+    internal_err, not_impl_err,
 };
 
 use datafusion_expr::binary::BinaryTypeCoercer;
@@ -281,7 +282,9 @@ fn decimal_unscaled(array: &ArrayRef, scale: i8) -> Result<Vec<Option<i256>>> {
     let values = wide
         .as_any()
         .downcast_ref::<Decimal256Array>()
-        .ok_or_else(|| internal_err!("decimal cast produced a non-decimal array"))?;
+        .ok_or_else(|| {
+            internal_datafusion_err!("decimal cast produced a non-decimal array")
+        })?;
     Ok((0..values.len())
         .map(|i| (!values.is_null(i)).then(|| values.value(i)))
         .collect())
@@ -388,8 +391,9 @@ fn decimal_divide(
                 })?,
             )
         };
-        let q = decimal_round_ratio(n, d)
-            .ok_or_else(|| internal_err!("decimal division lost its divisor"))?;
+        let q = decimal_round_ratio(n, d).ok_or_else(|| {
+            internal_datafusion_err!("decimal division lost its divisor")
+        })?;
         if q.wrapping_abs() >= limit {
             return exec_err!(
                 "DECIMAL_OVERFLOW: the quotient does not fit DECIMAL({precision},{scale})"

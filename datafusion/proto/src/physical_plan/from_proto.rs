@@ -23,10 +23,10 @@ use arrow::array::RecordBatch;
 use arrow::compute::SortOptions;
 use arrow::datatypes::{Field, FieldRef, Schema};
 use arrow::ipc::reader::StreamReader;
-use datafusion_common::{Result, internal_datafusion_err, not_impl_err};
-use datafusion_datasource::TableSchema;
+use datafusion_common::{internal_datafusion_err, not_impl_err, Result};
 use datafusion_datasource::file::FileSource;
 use datafusion_datasource::file_scan_config::FileScanConfig;
+use datafusion_datasource::TableSchema;
 use datafusion_execution::{FunctionRegistry, TaskContext};
 use datafusion_expr::WindowFunctionDefinition;
 use datafusion_physical_expr::expressions::{LambdaExpr, LambdaVariable};
@@ -313,13 +313,18 @@ pub fn parse_physical_expr_with_converter(
                 .iter()
                 .map(|a| a.return_field(input_schema))
                 .collect::<Result<Vec<_>>>()?;
-            let return_field = scalar_fun_def.return_field(&arg_fields).or_else(|_| {
-                Ok(Field::new(
-                    &e.return_field_name,
-                    convert_required!(e.return_type)?,
-                    true,
-                ))
-            })?;
+            let return_field = scalar_fun_def
+                .return_field_from_args(datafusion_expr::ReturnFieldArgs {
+                    arg_fields: &arg_fields,
+                    scalar_arguments: &[],
+                })
+                .or_else(|_| {
+                    Ok(Field::new(
+                        &e.return_field_name,
+                        convert_required!(e.return_type)?,
+                        true,
+                    ))
+                })?;
 
             Arc::new(
                 ScalarFunctionExpr::new(

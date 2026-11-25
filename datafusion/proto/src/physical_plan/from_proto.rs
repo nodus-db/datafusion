@@ -309,7 +309,11 @@ pub fn parse_physical_expr_with_converter(
             // `Field` from those three values silently drops its METADATA (e.g. the SRID on a geometry
             // return). The UDF is authoritative: ask it for the return field, and fall back to the wire
             // values only when it cannot answer (no `fun_definition`, mismatched arguments).
-            let return_field = scalar_fun_def.return_field(&args).or_else(|_| {
+            let arg_fields: Vec<FieldRef> = args
+                .iter()
+                .map(|a| a.return_field(input_schema))
+                .collect::<Result<Vec<_>>>()?;
+            let return_field = scalar_fun_def.return_field(&arg_fields).or_else(|_| {
                 Ok(Field::new(
                     &e.return_field_name,
                     convert_required!(e.return_type)?,

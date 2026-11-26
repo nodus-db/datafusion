@@ -320,7 +320,7 @@ pub fn parse_physical_expr_with_converter(
             // logical plan; the wire-triple fallback below still covers the cases it cannot serve.
             let scalar_arguments: Vec<Option<&ScalarValue>> = args
                 .iter()
-                .map(|a| a.as_any().downcast_ref::<Literal>().map(|l| l.value()))
+                .map(|a| a.as_ref().downcast_ref::<Literal>().map(|l| l.value()))
                 .collect();
             let return_field = scalar_fun_def
                 .return_field_from_args(ReturnFieldArgs {
@@ -328,11 +328,11 @@ pub fn parse_physical_expr_with_converter(
                     scalar_arguments: &scalar_arguments,
                 })
                 .or_else(|_| {
-                    Ok(Field::new(
+                    Ok(Arc::new(Field::new(
                         &e.return_field_name,
                         convert_required!(e.return_type)?,
                         true,
-                    ))
+                    )))
                 })?;
 
             Arc::new(

@@ -23,12 +23,12 @@ use arrow::array::RecordBatch;
 use arrow::compute::SortOptions;
 use arrow::datatypes::{Field, FieldRef, Schema};
 use arrow::ipc::reader::StreamReader;
-use datafusion_common::{Result, internal_datafusion_err, not_impl_err};
+use datafusion_common::{Result, ScalarValue, internal_datafusion_err, not_impl_err};
 use datafusion_datasource::TableSchema;
 use datafusion_datasource::file::FileSource;
 use datafusion_datasource::file_scan_config::FileScanConfig;
 use datafusion_execution::{FunctionRegistry, TaskContext};
-use datafusion_expr::WindowFunctionDefinition;
+use datafusion_expr::{ReturnFieldArgs, WindowFunctionDefinition};
 use datafusion_physical_expr::expressions::{LambdaExpr, LambdaVariable};
 use datafusion_physical_expr::scalar_subquery::ScalarSubqueryExpr;
 use datafusion_physical_expr::{
@@ -313,13 +313,27 @@ pub fn parse_physical_expr_with_converter(
                 .iter()
                 .map(|a| a.return_field(input_schema))
                 .collect::<Result<Vec<_>>>()?;
-            let return_field = scalar_fun_def.return_field(&arg_fields).or_else(|_| {
-                Ok(Field::new(
-                    &e.return_field_name,
-                    convert_required!(e.return_type)?,
-                    true,
-                ))
-            })?;
+            // The scalar arguments exactly as `Expr::to_field` derives them for the logical form
+            // (`datafusion/expr/src/expr_schema.rs`, `Expr::ScalarFunction` arm): `Some` for a
+            // constant argument, `None` for an expression that is not one. A UDF that decides its
+            // return metadata from a constant therefore gets the same answer here as it does for a
+            // logical plan; the wire-triple fallback below still covers the cases it cannot serve.
+            let scalar_arguments: Vec<Option<&ScalarValue>> = args
+                .iter()
+                .map(|a| a.as_any().downcast_ref::<Literal>().map(|l| l.value()))
+                .collect();
+            let return_field = scalar_fun_def
+                .return_field_from_args(ReturnFieldArgs {
+                    arg_fields: &arg_fields,
+                    scalar_arguments: &scalar_arguments,
+                })
+                .or_else(|_| {
+                    Ok(Field::new(
+                        &e.return_field_name,
+                        convert_required!(e.return_type)?,
+                        true,
+                    ))
+                })?;
 
             Arc::new(
                 ScalarFunctionExpr::new(

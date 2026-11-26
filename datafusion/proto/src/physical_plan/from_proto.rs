@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use arrow::compute::SortOptions;
-use arrow::datatypes::{Field, FieldRef, Schema};
+use arrow::datatypes::{DataType, Field, FieldRef, Schema};
 use arrow::ipc::reader::StreamReader;
 use datafusion_common::{Result, ScalarValue, internal_datafusion_err, not_impl_err};
 use datafusion_datasource::TableSchema;
@@ -322,18 +322,24 @@ pub fn parse_physical_expr_with_converter(
                 .iter()
                 .map(|a| a.as_ref().downcast_ref::<Literal>().map(|l| l.value()))
                 .collect();
-            let return_field = scalar_fun_def
-                .return_field_from_args(ReturnFieldArgs {
-                    arg_fields: &arg_fields,
-                    scalar_arguments: &scalar_arguments,
-                })
-                .or_else(|_| {
-                    Ok(Arc::new(Field::new(
-                        &e.return_field_name,
-                        convert_required!(e.return_type)?,
-                        true,
-                    )))
-                })?;
+            // The proto's `return_type` is authoritative for the TYPE: a worker's UDF may derive a
+            // different type from its own instance or from the plan's return field (e.g. `nodus_cast`
+            // under the UFR fix), and only the wire type guarantees the decoded expression agrees with
+            // the serialized plan. A field whose type differs is therefore rejected in favour of the
+            // wire triple; metadata still comes from the UDF when the types agree.
+            let proto_return_type: DataType = convert_required!(e.return_type)?;
+            let derived = scalar_fun_def.return_field_from_args(ReturnFieldArgs {
+                arg_fields: &arg_fields,
+                scalar_arguments: &scalar_arguments,
+            });
+            let return_field: FieldRef = match derived {
+                Ok(field) if field.data_type() == &proto_return_type => field,
+                _ => Arc::new(Field::new(
+                    &e.return_field_name,
+                    proto_return_type,
+                    true,
+                )),
+            };
 
             Arc::new(
                 ScalarFunctionExpr::new(
